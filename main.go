@@ -18,11 +18,14 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -55,6 +58,27 @@ type Domain struct {
 type PermutatedDomain struct {
 	Permutation string
 	Domain      Domain
+}
+
+// JSONBucket for interesting JSON data, send to Elasticsearch
+type JSONBucket struct {
+	URL      string
+	Name     string
+	FileName string
+	FileExt  string
+}
+
+// S3BucketXML struct defines all contents
+type S3BucketXML struct {
+	XMLName  xml.Name   `xml:"ListBucketResult"`
+	Name     string     `xml:"Name"`
+	Contents []Contents `xml:"Contents"`
+}
+
+// Contents looks for the Key value which is the file name
+type Contents struct {
+	XMLName xml.Name `xml:"Contents"`
+	File    string   `xml:"Key"`
 }
 
 var rootCmd = &cobra.Command{
@@ -135,6 +159,27 @@ func PreInit() {
 	if helpFlag {
 		os.Exit(0)
 	}
+}
+
+// GetXML reads the s3 bucket page:
+// https://stackoverflow.com/a/42718113
+func GetXML(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return []byte{}, fmt.Errorf("GET error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return []byte{}, fmt.Errorf("Status error: %v", resp.StatusCode)
+	}
+
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return []byte{}, fmt.Errorf("Read body: %v", err)
+	}
+
+	return data, nil
 }
 
 // StreamCerts takes input from certstream and stores it in the queue
@@ -219,10 +264,42 @@ func StoreInDB() {
 	}
 }
 
+// ReadExt reads the file interestingext.txt for interesting extensions
+// into an array
+func ReadExt(path string) ([]string, error) {
+	// Open File
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Read lines and append to results
+	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanWords)
+	var result []string
+	for scanner.Scan() {
+		x := scanner.Text()
+		result = append(result, x)
+	}
+	return result, scanner.Err()
+}
+
 // CheckPermutations runs through all permutations checking them for PUBLIC/FORBIDDEN buckets
 func CheckPermutations() {
 	var max = runtime.NumCPU() * 10
 	sem = make(chan int, max)
+
+	// Get array of interesting file extensions (interestingext.txt)
+	// Create map (all true)
+	extensions, err := ReadExt("interestingext.txt")
+	if err != nil {
+		log.Error(err)
+	}
+	set := make(map[string]bool)
+	for _, v := range extensions {
+		set[v] = true
+	}
 
 	for {
 		sem <- 1
@@ -309,6 +386,33 @@ func CheckPermutations() {
 
 				if resp.StatusCode == 200 {
 					log.Infof("\033[32m\033[1mPUBLIC\033[39m\033[0m %s (\033[33mhttp://%s.%s\033[39m)", loc, pd.Domain.Domain, pd.Domain.Suffix)
+
+					// Fetch bucket as XML
+					if xmlBytes, err := GetXML(loc); err != nil {
+						log.Infof("\033[31m\033[1mFAILED\033[39m\033[0 to view S3 bucket: %v", err)
+					} else {
+						log.Infof("\033[32m\033[1mPARSING\033[39m\033[0m S3 Bucket: %s", loc)
+
+						// Parse XML file using struct -> result
+						var result S3BucketXML
+						xml.Unmarshal(xmlBytes, &result)
+						// If there is files in Contents
+						if len(result.Contents) > 0 {
+							// Loop over Contents for each file name and file extension
+							for i := 0; i < len(result.Contents); i++ {
+								basename := result.Contents[i].File
+								ext := string(filepath.Ext(basename))
+								// Debug
+								//fmt.Println("Filename: " + basename)
+								//fmt.Println("Extension: " + ext)
+								if ext != "" {
+									if set[ext] {
+										log.Infof("Interesting file ext (%s) found @ \033[33mhttp://%s.%s%s\033[39m", ext, pd.Domain.Domain, pd.Domain.Suffix, basename)
+									}
+								}
+							}
+						}
+					}
 				} else if resp.StatusCode == 403 {
 					log.Infof("\033[31m\033[1mFORBIDDEN\033[39m\033[0m http://%s (\033[33mhttp://%s.%s\033[39m)", pd.Permutation, pd.Domain.Domain, pd.Domain.Suffix)
 				}
