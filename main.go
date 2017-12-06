@@ -48,6 +48,7 @@ var extract *tldextract.TLDExtract
 var checked int64
 var sem chan int
 var action string
+var extension string
 
 type Domain struct {
 	CN     string
@@ -112,8 +113,21 @@ var (
 	cfgDomain string
 )
 
+func getFlagBool(cmd *cobra.Command, flag string) bool {
+	f := cmd.Flags().Lookup(flag)
+	if f == nil {
+		log.Fatal("Error with flag")
+	}
+	// Caseless compare.
+	if strings.ToLower(f.Value.String()) == "true" {
+		return true
+	}
+	return false
+}
+
 func setFlags() {
 	manualCmd.PersistentFlags().StringVar(&cfgDomain, "domain", "", "Domain to enumerate s3 bucks with")
+	manualCmd.PersistentFlags().Bool("ext", false, "Uses the interestingext.txt to search s3 buckets for extenion matches")
 }
 
 // PreInit initializes goroutine concurrency and initializes cobra
@@ -290,6 +304,9 @@ func CheckPermutations() {
 	var max = runtime.NumCPU() * 10
 	sem = make(chan int, max)
 
+	// Checking for interesting file extensions?
+	extension_check := getFlagBool(manualCmd, "ext")
+
 	// Get array of interesting file extensions (interestingext.txt)
 	// Create map (all true)
 	extensions, err := ReadExt("interestingext.txt")
@@ -405,9 +422,11 @@ func CheckPermutations() {
 								// Debug
 								//fmt.Println("Filename: " + basename)
 								//fmt.Println("Extension: " + ext)
-								if ext != "" {
-									if set[ext] {
-										log.Infof("Interesting file ext (%s) found @ \033[33mhttp://%s.%s%s\033[39m", ext, pd.Domain.Domain, pd.Domain.Suffix, basename)
+								if extension_check {
+									if ext != "" {
+										if set[ext] {
+											log.Infof("Interesting file ext (%s) found @ \033[33mhttp://%s.%s%s\033[39m", ext, pd.Domain.Domain, pd.Domain.Suffix, basename)
+										}
 									}
 								}
 							}
