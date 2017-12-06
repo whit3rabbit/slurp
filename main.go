@@ -127,7 +127,7 @@ func getFlagBool(cmd *cobra.Command, flag string) bool {
 
 func setFlags() {
 	manualCmd.PersistentFlags().StringVar(&cfgDomain, "domain", "", "Domain to enumerate s3 bucks with")
-	manualCmd.PersistentFlags().Bool("ext", false, "Uses the interestingext.txt to search s3 buckets for extenion matches")
+	rootCmd.PersistentFlags().Bool("ext", false, "Uses the interestingext.txt to search s3 buckets for extenion matches")
 }
 
 // PreInit initializes goroutine concurrency and initializes cobra
@@ -305,7 +305,7 @@ func CheckPermutations() {
 	sem = make(chan int, max)
 
 	// Checking for interesting file extensions?
-	extension_check := getFlagBool(manualCmd, "ext")
+	extension_check := getFlagBool(rootCmd, "ext")
 
 	// Get array of interesting file extensions (interestingext.txt)
 	// Create map (all true)
