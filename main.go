@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -128,6 +129,7 @@ func getFlagBool(cmd *cobra.Command, flag string) bool {
 func setFlags() {
 	manualCmd.PersistentFlags().StringVar(&cfgDomain, "domain", "", "Domain to enumerate s3 bucks with")
 	rootCmd.PersistentFlags().Bool("ext", false, "Uses the interestingext.txt to search s3 buckets for extenion matches")
+	rootCmd.PersistentFlags().Bool("names", false, "Uses the interestingnames.txt to search s3 buckets for name matches")
 }
 
 // PreInit initializes goroutine concurrency and initializes cobra
@@ -278,9 +280,8 @@ func StoreInDB() {
 	}
 }
 
-// ReadExt reads the file interestingext.txt for interesting extensions
-// into an array
-func ReadExt(path string) ([]string, error) {
+// ReadFile returns results as array
+func ReadFile(path string) ([]string, error) {
 	// Open File
 	file, err := os.Open(path)
 	if err != nil {
@@ -306,16 +307,23 @@ func CheckPermutations() {
 
 	// Checking for interesting file extensions?
 	extension_check := getFlagBool(rootCmd, "ext")
+	name_check := getFlagBool(rootCmd, "names")
 
 	// Get array of interesting file extensions (interestingext.txt)
 	// Create map (all true)
-	extensions, err := ReadExt("interestingext.txt")
+	extensions, err := ReadFile("interestingext.txt")
 	if err != nil {
 		log.Error(err)
 	}
 	set := make(map[string]bool)
 	for _, v := range extensions {
 		set[v] = true
+	}
+
+	// Get array of regex from interesting names text file
+	names, err := ReadFile("interestingnames.txt")
+	if err != nil {
+		log.Error(err)
 	}
 
 	for {
@@ -418,14 +426,35 @@ func CheckPermutations() {
 							// Loop over Contents for each file name and file extension
 							for i := 0; i < len(result.Contents); i++ {
 								basename := result.Contents[i].File
-								ext := string(filepath.Ext(basename))
+								ext := strings.ToLower(filepath.Ext(basename))
 								// Debug
 								//fmt.Println("Filename: " + basename)
 								//fmt.Println("Extension: " + ext)
+
+								// Check names flag
+								if name_check {
+									// Loop
+									for _, RegexNames := range names {
+										// (?i) is for case insesnitive
+										rp, err := regexp.Compile("(?i)" + RegexNames)
+										if err != nil {
+											log.Error(err)
+										}
+										// Run regex against filename
+										foundBool := rp.MatchString(basename)
+										// If filename matches regex, print out result
+										if foundBool {
+											log.Infof("Regex match for (%s) found @ \033[33m%s%s\033[39m", RegexNames, loc, basename)
+										}
+									}
+								}
+								// Check ext flag
 								if extension_check {
+									// Check if there was an extension
 									if ext != "" {
+										// Use map and check extensions again interesting exts
 										if set[ext] {
-											log.Infof("Interesting file ext (%s) found @ \033[33mhttp://%s.%s%s\033[39m", ext, pd.Domain.Domain, pd.Domain.Suffix, basename)
+											log.Infof("Interesting file ext (%s) found @ \033[33m%s%s\033[39m", ext, loc, basename)
 										}
 									}
 								}

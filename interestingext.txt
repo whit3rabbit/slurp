@@ -1,6 +1,7 @@
 .sql
 .mysql
 .dump
+.yxdb
 .backup
 .tar
 .gz
@@ -18,3 +19,9 @@
 .pl
 .sh
 .go
+.ssh
+.npmrc
+.muttrc
+.gitconfig
+.netrc
+.npmrc
