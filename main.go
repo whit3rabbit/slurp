@@ -36,6 +36,7 @@ import (
 	"github.com/CaliDog/certstream-go"
 	"github.com/jmoiron/jsonq"
 	"github.com/joeguo/tldextract"
+	"github.com/olivere/elastic"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/Workiva/go-datastructures/queue"
@@ -50,6 +51,7 @@ var checked int64
 var sem chan int
 var action string
 var extension string
+var clientES string
 
 type Domain struct {
 	CN     string
@@ -112,6 +114,7 @@ var manualCmd = &cobra.Command{
 
 var (
 	cfgDomain string
+	esServer  string
 )
 
 func getFlagBool(cmd *cobra.Command, flag string) bool {
@@ -128,7 +131,9 @@ func getFlagBool(cmd *cobra.Command, flag string) bool {
 
 func setFlags() {
 	manualCmd.PersistentFlags().StringVar(&cfgDomain, "domain", "", "Domain to enumerate s3 bucks with")
-	rootCmd.PersistentFlags().Bool("ext", false, "Uses the interestingext.txt to search s3 buckets for extenion matches")
+	rootCmd.PersistentFlags().StringVar(&esServer, "es", "", "Elastic Search server address an port e.g. (http://127.0.0.1:9200)")
+	rootCmd.PersistentFlags().Bool("aliyun", false, "Use Aliyun instead of S3 buckets")
+	rootCmd.PersistentFlags().Bool("ext", false, "Uses the interestingext.txt to search s3 buckets for extension matches")
 	rootCmd.PersistentFlags().Bool("names", false, "Uses the interestingnames.txt to search s3 buckets for name matches")
 }
 
@@ -306,8 +311,8 @@ func CheckPermutations() {
 	sem = make(chan int, max)
 
 	// Checking for interesting file extensions?
-	extension_check := getFlagBool(rootCmd, "ext")
-	name_check := getFlagBool(rootCmd, "names")
+	extensionCheck := getFlagBool(rootCmd, "ext")
+	nameCheck := getFlagBool(rootCmd, "names")
 
 	// Get array of interesting file extensions (interestingext.txt)
 	// Create map (all true)
@@ -349,7 +354,15 @@ func CheckPermutations() {
 
 		go func(pd PermutatedDomain) {
 
-			req, err := http.NewRequest("GET", "http://s3-1-w.amazonaws.com", nil)
+			aliyunCheck := getFlagBool(rootCmd, "aliyun")
+
+			var req *http.Request
+
+			if aliyunCheck {
+				req, err = http.NewRequest("GET", "http://oss-cn-hangzhou.aliyuncs.com", nil)
+			} else {
+				req, err = http.NewRequest("GET", "http://s3-1-w.amazonaws.com", nil)
+			}
 
 			if err != nil {
 				if !strings.Contains(err.Error(), "time") {
@@ -432,7 +445,7 @@ func CheckPermutations() {
 								//fmt.Println("Extension: " + ext)
 
 								// Check names flag
-								if name_check {
+								if nameCheck {
 									// Loop
 									for _, RegexNames := range names {
 										// (?i) is for case insesnitive
@@ -449,7 +462,7 @@ func CheckPermutations() {
 									}
 								}
 								// Check ext flag
-								if extension_check {
+								if extensionCheck {
 									// Check if there was an extension
 									if ext != "" {
 										// Use map and check extensions again interesting exts
@@ -480,6 +493,11 @@ func CheckPermutations() {
 
 // PermutateDomain returns all possible domain permutations
 func PermutateDomain(domain, suffix string) []string {
+
+	var url string
+
+	aliyunCheck := getFlagBool(rootCmd, "aliyun")
+
 	jsondata, err := ioutil.ReadFile("./permutations.json")
 
 	if err != nil {
@@ -491,8 +509,13 @@ func PermutateDomain(domain, suffix string) []string {
 	dec.Decode(&data)
 	jq := jsonq.NewQuery(data)
 
-	s3url, err := jq.String("s3_url")
+	if !aliyunCheck {
+		url, err = jq.String("s3_url")
+	} else {
+		url, err = jq.String("aliyun_url")
+	}
 
+	log.Infof("Setting domain to %s", url)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -507,12 +530,12 @@ func PermutateDomain(domain, suffix string) []string {
 
 	// Our list of permutations
 	for i := range perms {
-		permutations = append(permutations, fmt.Sprintf(perms[i].(string), domain, s3url))
+		permutations = append(permutations, fmt.Sprintf(perms[i].(string), domain, url))
 	}
 
 	// Permutations that are not easily put into the list
-	permutations = append(permutations, fmt.Sprintf("%s.%s.%s", domain, suffix, s3url))
-	permutations = append(permutations, fmt.Sprintf("%s.%s", strings.Replace(fmt.Sprintf("%s.%s", domain, suffix), ".", "", -1), s3url))
+	permutations = append(permutations, fmt.Sprintf("%s.%s.%s", domain, suffix, url))
+	permutations = append(permutations, fmt.Sprintf("%s.%s", strings.Replace(fmt.Sprintf("%s.%s", domain, suffix), ".", "", -1), url))
 
 	return permutations
 }
@@ -548,6 +571,20 @@ func PrintJob() {
 
 func main() {
 	PreInit()
+
+	// If elastic search enabled
+	if esServer != "" {
+		// Connect to elastic search server
+		clientES, err := elastic.NewClient(elastic.SetURL(esServer))
+		if err != nil {
+			panic(err)
+		}
+		version, err := clientES.ElasticsearchVersion(esServer)
+		if err != nil {
+			panic(err)
+		}
+		log.Infof("Elastic search version %s", version)
+	}
 
 	switch action {
 	case "CERTSTREAM":

@@ -1,5 +1,4 @@
 backup
-source
 secret
 database
 password
@@ -7,3 +6,5 @@ login
 private
 credentials
 sensitive
+voter
+contract
