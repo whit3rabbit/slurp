@@ -355,9 +355,7 @@ func CheckPermutations() {
 		go func(pd PermutatedDomain) {
 
 			aliyunCheck := getFlagBool(rootCmd, "aliyun")
-
 			var req *http.Request
-
 			if aliyunCheck {
 				req, err = http.NewRequest("GET", "http://oss-cn-hangzhou.aliyuncs.com", nil)
 			} else {
@@ -515,7 +513,6 @@ func PermutateDomain(domain, suffix string) []string {
 		url, err = jq.String("aliyun_url")
 	}
 
-	log.Infof("Setting domain to %s", url)
 	if err != nil {
 		log.Fatal(err)
 	}
