@@ -1,6 +1,5 @@
 {
 	"s3_url": "s3.amazonaws.com",
-    "aliyun_url": "oss.aliyuncs.com",
     "permutations": [
         "%s.%s",
 		"www-%s.%s",

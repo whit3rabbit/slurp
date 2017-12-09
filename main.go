@@ -132,7 +132,6 @@ func getFlagBool(cmd *cobra.Command, flag string) bool {
 func setFlags() {
 	manualCmd.PersistentFlags().StringVar(&cfgDomain, "domain", "", "Domain to enumerate s3 bucks with")
 	rootCmd.PersistentFlags().StringVar(&esServer, "es", "", "Elastic Search server address an port e.g. (http://127.0.0.1:9200)")
-	rootCmd.PersistentFlags().Bool("aliyun", false, "Use Aliyun instead of S3 buckets")
 	rootCmd.PersistentFlags().Bool("ext", false, "Uses the interestingext.txt to search s3 buckets for extension matches")
 	rootCmd.PersistentFlags().Bool("names", false, "Uses the interestingnames.txt to search s3 buckets for name matches")
 }
@@ -354,13 +353,7 @@ func CheckPermutations() {
 
 		go func(pd PermutatedDomain) {
 
-			aliyunCheck := getFlagBool(rootCmd, "aliyun")
-			var req *http.Request
-			if aliyunCheck {
-				req, err = http.NewRequest("GET", "http://oss-cn-hangzhou.aliyuncs.com", nil)
-			} else {
-				req, err = http.NewRequest("GET", "http://s3-1-w.amazonaws.com", nil)
-			}
+			req, err := http.NewRequest("GET", "http://s3-1-w.amazonaws.com", nil)
 
 			if err != nil {
 				if !strings.Contains(err.Error(), "time") {
@@ -492,10 +485,6 @@ func CheckPermutations() {
 // PermutateDomain returns all possible domain permutations
 func PermutateDomain(domain, suffix string) []string {
 
-	var url string
-
-	aliyunCheck := getFlagBool(rootCmd, "aliyun")
-
 	jsondata, err := ioutil.ReadFile("./permutations.json")
 
 	if err != nil {
@@ -507,11 +496,7 @@ func PermutateDomain(domain, suffix string) []string {
 	dec.Decode(&data)
 	jq := jsonq.NewQuery(data)
 
-	if !aliyunCheck {
-		url, err = jq.String("s3_url")
-	} else {
-		url, err = jq.String("aliyun_url")
-	}
+	url, err := jq.String("s3_url")
 
 	if err != nil {
 		log.Fatal(err)
@@ -527,6 +512,7 @@ func PermutateDomain(domain, suffix string) []string {
 
 	// Our list of permutations
 	for i := range perms {
+		// perm.domain.s3.amazonaws.com
 		permutations = append(permutations, fmt.Sprintf(perms[i].(string), domain, url))
 	}
 
