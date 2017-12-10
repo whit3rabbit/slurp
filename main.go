@@ -37,6 +37,7 @@ import (
 	"github.com/jmoiron/jsonq"
 	"github.com/joeguo/tldextract"
 	"github.com/olivere/elastic"
+	"github.com/ti/nasync"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/Workiva/go-datastructures/queue"
@@ -113,8 +114,9 @@ var manualCmd = &cobra.Command{
 }
 
 var (
-	cfgDomain string
-	esServer  string
+	cfgDomain  string
+	DomainFile string
+	esServer   string
 )
 
 func getFlagBool(cmd *cobra.Command, flag string) bool {
@@ -131,6 +133,7 @@ func getFlagBool(cmd *cobra.Command, flag string) bool {
 
 func setFlags() {
 	manualCmd.PersistentFlags().StringVar(&cfgDomain, "domain", "", "Domain to enumerate s3 bucks with")
+	manualCmd.PersistentFlags().StringVar(&DomainFile, "file", "", "File of domains to enumerate s3 bucks with")
 	rootCmd.PersistentFlags().StringVar(&esServer, "es", "", "Elastic Search server address an port e.g. (http://127.0.0.1:9200)")
 	rootCmd.PersistentFlags().Bool("ext", false, "Uses the interestingext.txt to search s3 buckets for extension matches")
 	rootCmd.PersistentFlags().Bool("names", false, "Uses the interestingnames.txt to search s3 buckets for name matches")
@@ -552,6 +555,41 @@ func PrintJob() {
 	}
 }
 
+func manualStart(d Domain) {
+
+	dbQ.Put(d)
+
+	//log.Info("Starting to process queue....")
+	//go ProcessQueue()
+
+	go StoreInDB()
+
+	log.Info("Starting to process permutations....")
+	nasync.Do(func() {
+		CheckPermutations()
+	})
+	//go CheckPermutations()
+
+	for {
+		// 3 second hard sleep; added because sometimes it's possible to switch exit = true
+		// in the time it takes to get from dbQ.Put(d); we can't have that...
+		// So, a 3 sec sleep will prevent an pre-mature exit; but in most cases shouldn't really be noticable
+		time.Sleep(3 * time.Second)
+
+		if exit {
+			break
+		}
+
+		if permutatedQ.Len() != 0 || dbQ.Len() > 0 || len(sem) > 0 {
+			if len(sem) == 1 {
+				<-sem
+			}
+		} else {
+			exit = true
+		}
+	}
+}
+
 func main() {
 	PreInit()
 
@@ -596,52 +634,53 @@ func main() {
 			time.Sleep(1 * time.Second)
 		}
 	case "MANUAL":
-		if cfgDomain == "" {
-			log.Fatal("You must specify a domain to enumerate")
+
+		// Both flags are empty
+		if cfgDomain == "" && DomainFile == "" {
+			log.Fatal("You must specify single domain --domain or file --file")
+		}
+
+		// Both flags are not empty
+		if cfgDomain != "" && DomainFile != "" {
+			log.Fatal("You must select between --domain or file --file")
 		}
 
 		Init()
 
-		result := extract.Extract(cfgDomain)
-
-		if result.Root == "" || result.Tld == "" {
-			log.Fatal("Is the domain even valid bruh?")
-		}
-
-		d := Domain{
-			CN:     cfgDomain,
-			Domain: result.Root,
-			Suffix: result.Tld,
-		}
-
-		dbQ.Put(d)
-
-		//log.Info("Starting to process queue....")
-		//go ProcessQueue()
-
-		//log.Info("Starting to stream certs....")
-		go StoreInDB()
-
-		log.Info("Starting to process permutations....")
-		go CheckPermutations()
-
-		for {
-			// 3 second hard sleep; added because sometimes it's possible to switch exit = true
-			// in the time it takes to get from dbQ.Put(d); we can't have that...
-			// So, a 3 sec sleep will prevent an pre-mature exit; but in most cases shouldn't really be noticable
-			time.Sleep(3 * time.Second)
-
-			if exit {
-				break
+		// If reading from file cointaing domain names
+		if DomainFile != "" {
+			// Read the file
+			DomainLines, err := ReadFile(DomainFile)
+			if err != nil {
+				log.Fatal(err)
 			}
 
-			if permutatedQ.Len() != 0 || dbQ.Len() > 0 || len(sem) > 0 {
-				if len(sem) == 1 {
-					<-sem
+			// Loop over each "line" = (domain)
+			for _, domain := range DomainLines {
+				result := extract.Extract(domain)
+				if result.Root == "" || result.Tld == "" {
+					log.Fatal("Is the domain even valid bruh?")
 				}
-			} else {
-				exit = true
+
+				d := Domain{
+					CN:     domain,
+					Domain: result.Root,
+					Suffix: result.Tld,
+				}
+				manualStart(d)
 			}
+		} else {
+			result := extract.Extract(cfgDomain)
+			if result.Root == "" || result.Tld == "" {
+				log.Fatal("Is the domain even valid bruh?")
+			}
+
+			d := Domain{
+				CN:     cfgDomain,
+				Domain: result.Root,
+				Suffix: result.Tld,
+			}
+			manualStart(d)
 		}
 
 	case "NADA":
