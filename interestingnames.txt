@@ -5,6 +5,15 @@ password
 login
 private
 credentials
+creds
 sensitive
 voter
 contract
+api.key
+apikey
+access.key
+accesskey
+malware
+virus
+rootkit
+keylogger

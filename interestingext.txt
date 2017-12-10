@@ -1,6 +1,7 @@
 .sql
 .mysql
 .dump
+.bson
 .yxdb
 .backup
 .tar
@@ -8,6 +9,7 @@
 .xz
 .rar
 .zip
+.7zip
 .kdbx
 .docx
 .doc
@@ -25,3 +27,6 @@
 .gitconfig
 .netrc
 .npmrc
+.rdp
+.pem
+.ppk
