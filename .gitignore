@@ -6,3 +6,5 @@ slurp-macos-amd64
 slurp-windows-386.exe
 slurp-windows-amd64.exe
 slurp.exe
+debug
+.vscode/launch.json

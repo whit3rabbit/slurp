@@ -18,11 +18,16 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -32,6 +37,8 @@ import (
 	"github.com/CaliDog/certstream-go"
 	"github.com/jmoiron/jsonq"
 	"github.com/joeguo/tldextract"
+	"github.com/olivere/elastic"
+	"github.com/ti/nasync"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/Workiva/go-datastructures/queue"
@@ -45,6 +52,8 @@ var extract *tldextract.TLDExtract
 var checked int64
 var sem chan int
 var action string
+var extension string
+var clientES string
 
 type Domain struct {
 	CN     string
@@ -55,6 +64,62 @@ type Domain struct {
 type PermutatedDomain struct {
 	Permutation string
 	Domain      Domain
+}
+
+// ElasticSearch data
+const mapping = `
+{
+	"settings":{
+		"number_of_shards": 1,
+		"number_of_replicas": 0
+	},
+	"mappings":{
+		"slurp":{
+			"properties":{
+				"url":{
+					"type":"keyword"
+				},
+				"time":{
+					"type":"date"
+				},
+				"exthit":{
+					"type":"array"
+				},
+				"regexhit":{
+					"type":"array"
+				},
+				"fileext":{
+					"type":"array"
+				},
+				"filename":{
+					"type":"array"
+				}
+			}
+		}
+	}
+}`
+
+// JSONBucket for interesting JSON data, send to Elasticsearch
+type JSONBucket struct {
+	Time     time.Time `json:"time"`
+	URL      string    `json:"url"`
+	FileName []string  `json:"filename,omitempty"`
+	FileExt  []string  `json:"fileext,omitempty"`
+	RegexHit []string  `json:"regexhit,omitempty"`
+	ExtHit   []string  `json:"exthit,omitempty"`
+}
+
+// S3BucketXML struct defines all contents
+type S3BucketXML struct {
+	XMLName  xml.Name   `xml:"ListBucketResult"`
+	Name     string     `xml:"Name"`
+	Contents []Contents `xml:"Contents"`
+}
+
+// Contents looks for the Key value which is the file name
+type Contents struct {
+	XMLName xml.Name `xml:"Contents"`
+	File    string   `xml:"Key"`
 }
 
 var rootCmd = &cobra.Command{
@@ -85,11 +150,29 @@ var manualCmd = &cobra.Command{
 }
 
 var (
-	cfgDomain string
+	cfgDomain  string
+	DomainFile string
+	esServer   string
 )
+
+func getFlagBool(cmd *cobra.Command, flag string) bool {
+	f := cmd.Flags().Lookup(flag)
+	if f == nil {
+		log.Fatal("Error with flag")
+	}
+	// Caseless compare.
+	if strings.ToLower(f.Value.String()) == "true" {
+		return true
+	}
+	return false
+}
 
 func setFlags() {
 	manualCmd.PersistentFlags().StringVar(&cfgDomain, "domain", "", "Domain to enumerate s3 bucks with")
+	manualCmd.PersistentFlags().StringVar(&DomainFile, "file", "", "File of domains to enumerate s3 bucks with")
+	rootCmd.PersistentFlags().StringVar(&esServer, "es", "", "Elastic Search server address an port e.g. (http://127.0.0.1:9200)")
+	rootCmd.PersistentFlags().Bool("ext", false, "Uses the interestingext.txt to search s3 buckets for extension matches")
+	rootCmd.PersistentFlags().Bool("names", false, "Uses the interestingnames.txt to search s3 buckets for name matches")
 }
 
 // PreInit initializes goroutine concurrency and initializes cobra
@@ -135,6 +218,27 @@ func PreInit() {
 	if helpFlag {
 		os.Exit(0)
 	}
+}
+
+// GetXML reads the s3 bucket page:
+// https://stackoverflow.com/a/42718113
+func GetXML(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return []byte{}, fmt.Errorf("GET error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return []byte{}, fmt.Errorf("Status error: %v", resp.StatusCode)
+	}
+
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return []byte{}, fmt.Errorf("Read body: %v", err)
+	}
+
+	return data, nil
 }
 
 // StreamCerts takes input from certstream and stores it in the queue
@@ -204,7 +308,7 @@ func StoreInDB() {
 			continue
 		}
 
-		var d Domain = dstruct[0].(Domain)
+		var d = dstruct[0].(Domain)
 
 		//log.Infof("CN: %s\tDomain: %s.%s", d.CN, d.Domain, d.Suffix)
 
@@ -219,10 +323,127 @@ func StoreInDB() {
 	}
 }
 
+// Add data to elastic search
+func doElasticSearch(loc string, namesList []string, extList []string, regexHitsDeduped []string, extHitsDeduped []string) {
+
+	ctx := context.Background()
+
+	// Connect to elastic search server
+	clientES, err := elastic.NewClient(elastic.SetURL(esServer))
+	if err != nil {
+		panic(err)
+	}
+
+	/*
+		version, err := clientES.ElasticsearchVersion(esServer)
+		if err != nil {
+			panic(err)
+		}
+		log.Infof("Elastic search version %s", version)
+	*/
+
+	// Use the IndexExists service to check if a specified index exists.
+	exists, err := clientES.IndexExists("slurp").Do(ctx)
+	if err != nil {
+		// Handle error
+		panic(err)
+	}
+	if !exists {
+		// Create a new index.
+		createIndex, err := clientES.CreateIndex("slurp").BodyString(mapping).Do(ctx)
+		if err != nil {
+			// Handle error
+			panic(err)
+		}
+		if !createIndex.Acknowledged {
+			// Not acknowledged
+		}
+	}
+	// Index results (using JSON serialization)
+	indexme := JSONBucket{
+		URL:      loc,
+		FileName: namesList,
+		Time:     time.Now(),
+		FileExt:  extList,
+		RegexHit: regexHitsDeduped,
+		ExtHit:   extHitsDeduped,
+	}
+	put, err := clientES.Index().
+		Index("slurp").
+		Type("slurp").
+		BodyJson(indexme).
+		Do(ctx)
+	if err != nil {
+		// Handle error
+		panic(err)
+	}
+	fmt.Printf("Indexed slurp data to %s to index %s, type %s\n", put.Id, put.Index, put.Type)
+}
+
+func removeDuplicates(elements []string) []string {
+	// Use map to record duplicates as we find them.
+	encountered := map[string]bool{}
+	result := []string{}
+
+	for v := range elements {
+		if encountered[elements[v]] == true {
+			// Do not add duplicate.
+		} else {
+			// Record this element as an encountered element.
+			encountered[elements[v]] = true
+			// Append to result slice.
+			result = append(result, elements[v])
+		}
+	}
+	// Return the new slice.
+	return result
+}
+
+// ReadFile returns results as array
+func ReadFile(path string) ([]string, error) {
+	// Open File
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Read lines and append to results
+	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanWords)
+	var result []string
+	for scanner.Scan() {
+		x := scanner.Text()
+		result = append(result, x)
+	}
+	return result, scanner.Err()
+}
+
 // CheckPermutations runs through all permutations checking them for PUBLIC/FORBIDDEN buckets
 func CheckPermutations() {
 	var max = runtime.NumCPU() * 10
 	sem = make(chan int, max)
+
+	// Checking for interesting file extensions?
+	extensionCheck := getFlagBool(rootCmd, "ext")
+	nameCheck := getFlagBool(rootCmd, "names")
+
+	// Get array of interesting file extensions (interestingext.txt)
+	// Create map (all true)
+	extensions, err := ReadFile("interestingext.txt")
+	if err != nil {
+		log.Error(err)
+	}
+	set := make(map[string]bool)
+	for _, v := range extensions {
+		set[v] = true
+	}
+
+	// Get array of regex from interesting names text file
+	names, err := ReadFile("interestingnames.txt")
+	if err != nil {
+		log.Error(err)
+	}
 
 	for {
 		sem <- 1
@@ -231,6 +452,11 @@ func CheckPermutations() {
 		if err != nil {
 			log.Error(err)
 		}
+
+		var extList []string
+		var namesList []string
+		var extHits []string
+		var regexHits []string
 
 		tr := &http.Transport{
 			IdleConnTimeout:       3 * time.Second,
@@ -308,7 +534,75 @@ func CheckPermutations() {
 				defer resp.Body.Close()
 
 				if resp.StatusCode == 200 {
+
 					log.Infof("\033[32m\033[1mPUBLIC\033[39m\033[0m %s (\033[33mhttp://%s.%s\033[39m)", loc, pd.Domain.Domain, pd.Domain.Suffix)
+
+					// Fetch bucket as XML
+					if xmlBytes, err := GetXML(loc); err != nil {
+						log.Infof("\033[31m\033[1mFAILED\033[39m\033[0 to view S3 bucket: %v", err)
+					} else {
+						log.Infof("\033[32m\033[1mPARSING\033[39m\033[0m S3 Bucket: %s", loc)
+
+						// Parse XML file using struct -> result
+						var result S3BucketXML
+						xml.Unmarshal(xmlBytes, &result)
+						// If there is files in Contents
+						if len(result.Contents) > 0 {
+
+							// Loop over Contents for each file name and file extension
+							for i := 0; i < len(result.Contents); i++ {
+								basename := result.Contents[i].File
+								ext := strings.ToLower(filepath.Ext(basename))
+								// Debug
+								//fmt.Println("Filename: " + basename)
+								//fmt.Println("Extension: " + ext)
+
+								// Check names flag
+								if nameCheck {
+									// Loop
+									for _, RegexNames := range names {
+										// (?i) is for case insesnitive
+										rp, err := regexp.Compile("(?i)" + RegexNames)
+										if err != nil {
+											log.Error(err)
+										}
+										// Run regex against filename
+										foundBool := rp.MatchString(basename)
+										// If filename matches regex, print out result
+										if foundBool {
+											fullURL := loc + basename
+											log.Infof("Regex match for (%s) found @ \033[33m%s\033[39m", RegexNames, fullURL)
+											namesList = append(namesList, fullURL)
+											regexHits = append(regexHits, RegexNames)
+										}
+									}
+								}
+								// Check ext flag
+								if extensionCheck {
+									// Check if there was an extension
+									if ext != "" {
+										// Use map and check extensions again interesting exts
+										if set[ext] {
+											fullURL := loc + basename
+											log.Infof("Interesting file ext (%s) found @ \033[33m%s\033[39m", ext, fullURL)
+											extList = append(extList, fullURL)
+											extHits = append(extHits, ext)
+										}
+									}
+								}
+							}
+						}
+					}
+
+					if esServer != "" {
+						// Dedupe extensions and regex hits
+						regexHitsDeduped := removeDuplicates(regexHits)
+						extHitsDeduped := removeDuplicates(extHits)
+
+						// Send data to elastic search
+						doElasticSearch(loc, namesList, extList, regexHitsDeduped, extHitsDeduped)
+					}
+
 				} else if resp.StatusCode == 403 {
 					log.Infof("\033[31m\033[1mFORBIDDEN\033[39m\033[0m http://%s (\033[33mhttp://%s.%s\033[39m)", pd.Permutation, pd.Domain.Domain, pd.Domain.Suffix)
 				}
@@ -328,6 +622,7 @@ func CheckPermutations() {
 
 // PermutateDomain returns all possible domain permutations
 func PermutateDomain(domain, suffix string) []string {
+
 	jsondata, err := ioutil.ReadFile("./permutations.json")
 
 	if err != nil {
@@ -339,7 +634,7 @@ func PermutateDomain(domain, suffix string) []string {
 	dec.Decode(&data)
 	jq := jsonq.NewQuery(data)
 
-	s3url, err := jq.String("s3_url")
+	url, err := jq.String("s3_url")
 
 	if err != nil {
 		log.Fatal(err)
@@ -355,12 +650,13 @@ func PermutateDomain(domain, suffix string) []string {
 
 	// Our list of permutations
 	for i := range perms {
-		permutations = append(permutations, fmt.Sprintf(perms[i].(string), domain, s3url))
+		// perm.domain.s3.amazonaws.com
+		permutations = append(permutations, fmt.Sprintf(perms[i].(string), domain, url))
 	}
 
 	// Permutations that are not easily put into the list
-	permutations = append(permutations, fmt.Sprintf("%s.%s.%s", domain, suffix, s3url))
-	permutations = append(permutations, fmt.Sprintf("%s.%s", strings.Replace(fmt.Sprintf("%s.%s", domain, suffix), ".", "", -1), s3url))
+	permutations = append(permutations, fmt.Sprintf("%s.%s.%s", domain, suffix, url))
+	permutations = append(permutations, fmt.Sprintf("%s.%s", strings.Replace(fmt.Sprintf("%s.%s", domain, suffix), ".", "", -1), url))
 
 	return permutations
 }
@@ -394,6 +690,41 @@ func PrintJob() {
 	}
 }
 
+func manualStart(d Domain) {
+
+	dbQ.Put(d)
+
+	//log.Info("Starting to process queue....")
+	//go ProcessQueue()
+
+	go StoreInDB()
+
+	log.Info("Starting to process permutations....")
+	nasync.Do(func() {
+		CheckPermutations()
+	})
+	//go CheckPermutations()
+
+	for {
+		// 3 second hard sleep; added because sometimes it's possible to switch exit = true
+		// in the time it takes to get from dbQ.Put(d); we can't have that...
+		// So, a 3 sec sleep will prevent an pre-mature exit; but in most cases shouldn't really be noticable
+		time.Sleep(3 * time.Second)
+
+		if exit {
+			break
+		}
+
+		if permutatedQ.Len() != 0 || dbQ.Len() > 0 || len(sem) > 0 {
+			if len(sem) == 1 {
+				<-sem
+			}
+		} else {
+			exit = true
+		}
+	}
+}
+
 func main() {
 	PreInit()
 
@@ -424,52 +755,53 @@ func main() {
 			time.Sleep(1 * time.Second)
 		}
 	case "MANUAL":
-		if cfgDomain == "" {
-			log.Fatal("You must specify a domain to enumerate")
+
+		// Both flags are empty
+		if cfgDomain == "" && DomainFile == "" {
+			log.Fatal("You must specify single domain --domain or file --file")
+		}
+
+		// Both flags are not empty
+		if cfgDomain != "" && DomainFile != "" {
+			log.Fatal("You must select between --domain or file --file")
 		}
 
 		Init()
 
-		result := extract.Extract(cfgDomain)
-
-		if result.Root == "" || result.Tld == "" {
-			log.Fatal("Is the domain even valid bruh?")
-		}
-
-		d := Domain{
-			CN:     cfgDomain,
-			Domain: result.Root,
-			Suffix: result.Tld,
-		}
-
-		dbQ.Put(d)
-
-		//log.Info("Starting to process queue....")
-		//go ProcessQueue()
-
-		//log.Info("Starting to stream certs....")
-		go StoreInDB()
-
-		log.Info("Starting to process permutations....")
-		go CheckPermutations()
-
-		for {
-			// 3 second hard sleep; added because sometimes it's possible to switch exit = true
-			// in the time it takes to get from dbQ.Put(d); we can't have that...
-			// So, a 3 sec sleep will prevent an pre-mature exit; but in most cases shouldn't really be noticable
-			time.Sleep(3 * time.Second)
-
-			if exit {
-				break
+		// If reading from file cointaing domain names
+		if DomainFile != "" {
+			// Read the file
+			DomainLines, err := ReadFile(DomainFile)
+			if err != nil {
+				log.Fatal(err)
 			}
 
-			if permutatedQ.Len() != 0 || dbQ.Len() > 0 || len(sem) > 0 {
-				if len(sem) == 1 {
-					<-sem
+			// Loop over each "line" = (domain)
+			for _, domain := range DomainLines {
+				result := extract.Extract(domain)
+				if result.Root == "" || result.Tld == "" {
+					log.Fatal("Is the domain even valid bruh?")
 				}
-			} else {
-				exit = true
+
+				d := Domain{
+					CN:     domain,
+					Domain: result.Root,
+					Suffix: result.Tld,
+				}
+				manualStart(d)
 			}
+		} else {
+			result := extract.Extract(cfgDomain)
+			if result.Root == "" || result.Tld == "" {
+				log.Fatal("Is the domain even valid bruh?")
+			}
+
+			d := Domain{
+				CN:     cfgDomain,
+				Domain: result.Root,
+				Suffix: result.Tld,
+			}
+			manualStart(d)
 		}
 
 	case "NADA":
