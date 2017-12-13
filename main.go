@@ -19,6 +19,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -65,12 +66,47 @@ type PermutatedDomain struct {
 	Domain      Domain
 }
 
+// ElasticSearch data
+const mapping = `
+{
+	"settings":{
+		"number_of_shards": 1,
+		"number_of_replicas": 0
+	},
+	"mappings":{
+		"slurp":{
+			"properties":{
+				"url":{
+					"type":"keyword"
+				},
+				"time":{
+					"type":"date"
+				},
+				"exthit":{
+					"type":"array"
+				},
+				"regexhit":{
+					"type":"array"
+				},
+				"fileext":{
+					"type":"array"
+				},
+				"filename":{
+					"type":"array"
+				}
+			}
+		}
+	}
+}`
+
 // JSONBucket for interesting JSON data, send to Elasticsearch
 type JSONBucket struct {
-	URL      string
-	Name     string
-	FileName string
-	FileExt  string
+	Time     time.Time `json:"time"`
+	URL      string    `json:"url"`
+	FileName []string  `json:"filename,omitempty"`
+	FileExt  []string  `json:"fileext,omitempty"`
+	RegexHit []string  `json:"regexhit,omitempty"`
+	ExtHit   []string  `json:"exthit,omitempty"`
 }
 
 // S3BucketXML struct defines all contents
@@ -272,7 +308,7 @@ func StoreInDB() {
 			continue
 		}
 
-		var d Domain = dstruct[0].(Domain)
+		var d = dstruct[0].(Domain)
 
 		//log.Infof("CN: %s\tDomain: %s.%s", d.CN, d.Domain, d.Suffix)
 
@@ -285,6 +321,82 @@ func StoreInDB() {
 			})
 		}
 	}
+}
+
+// Add data to elastic search
+func doElasticSearch(loc string, namesList []string, extList []string, regexHitsDeduped []string, extHitsDeduped []string) {
+
+	ctx := context.Background()
+
+	// Connect to elastic search server
+	clientES, err := elastic.NewClient(elastic.SetURL(esServer))
+	if err != nil {
+		panic(err)
+	}
+
+	/*
+		version, err := clientES.ElasticsearchVersion(esServer)
+		if err != nil {
+			panic(err)
+		}
+		log.Infof("Elastic search version %s", version)
+	*/
+
+	// Use the IndexExists service to check if a specified index exists.
+	exists, err := clientES.IndexExists("slurp").Do(ctx)
+	if err != nil {
+		// Handle error
+		panic(err)
+	}
+	if !exists {
+		// Create a new index.
+		createIndex, err := clientES.CreateIndex("slurp").BodyString(mapping).Do(ctx)
+		if err != nil {
+			// Handle error
+			panic(err)
+		}
+		if !createIndex.Acknowledged {
+			// Not acknowledged
+		}
+	}
+	// Index results (using JSON serialization)
+	indexme := JSONBucket{
+		URL:      loc,
+		FileName: namesList,
+		Time:     time.Now(),
+		FileExt:  extList,
+		RegexHit: regexHitsDeduped,
+		ExtHit:   extHitsDeduped,
+	}
+	put, err := clientES.Index().
+		Index("slurp").
+		Type("slurp").
+		BodyJson(indexme).
+		Do(ctx)
+	if err != nil {
+		// Handle error
+		panic(err)
+	}
+	fmt.Printf("Indexed slurp data to %s to index %s, type %s\n", put.Id, put.Index, put.Type)
+}
+
+func removeDuplicates(elements []string) []string {
+	// Use map to record duplicates as we find them.
+	encountered := map[string]bool{}
+	result := []string{}
+
+	for v := range elements {
+		if encountered[elements[v]] == true {
+			// Do not add duplicate.
+		} else {
+			// Record this element as an encountered element.
+			encountered[elements[v]] = true
+			// Append to result slice.
+			result = append(result, elements[v])
+		}
+	}
+	// Return the new slice.
+	return result
 }
 
 // ReadFile returns results as array
@@ -340,6 +452,11 @@ func CheckPermutations() {
 		if err != nil {
 			log.Error(err)
 		}
+
+		var extList []string
+		var namesList []string
+		var extHits []string
+		var regexHits []string
 
 		tr := &http.Transport{
 			IdleConnTimeout:       3 * time.Second,
@@ -417,6 +534,7 @@ func CheckPermutations() {
 				defer resp.Body.Close()
 
 				if resp.StatusCode == 200 {
+
 					log.Infof("\033[32m\033[1mPUBLIC\033[39m\033[0m %s (\033[33mhttp://%s.%s\033[39m)", loc, pd.Domain.Domain, pd.Domain.Suffix)
 
 					// Fetch bucket as XML
@@ -430,6 +548,7 @@ func CheckPermutations() {
 						xml.Unmarshal(xmlBytes, &result)
 						// If there is files in Contents
 						if len(result.Contents) > 0 {
+
 							// Loop over Contents for each file name and file extension
 							for i := 0; i < len(result.Contents); i++ {
 								basename := result.Contents[i].File
@@ -451,7 +570,10 @@ func CheckPermutations() {
 										foundBool := rp.MatchString(basename)
 										// If filename matches regex, print out result
 										if foundBool {
-											log.Infof("Regex match for (%s) found @ \033[33m%s%s\033[39m", RegexNames, loc, basename)
+											fullURL := loc + basename
+											log.Infof("Regex match for (%s) found @ \033[33m%s\033[39m", RegexNames, fullURL)
+											namesList = append(namesList, fullURL)
+											regexHits = append(regexHits, RegexNames)
 										}
 									}
 								}
@@ -461,13 +583,26 @@ func CheckPermutations() {
 									if ext != "" {
 										// Use map and check extensions again interesting exts
 										if set[ext] {
-											log.Infof("Interesting file ext (%s) found @ \033[33m%s%s\033[39m", ext, loc, basename)
+											fullURL := loc + basename
+											log.Infof("Interesting file ext (%s) found @ \033[33m%s\033[39m", ext, fullURL)
+											extList = append(extList, fullURL)
+											extHits = append(extHits, ext)
 										}
 									}
 								}
 							}
 						}
 					}
+
+					if esServer != "" {
+						// Dedupe extensions and regex hits
+						regexHitsDeduped := removeDuplicates(regexHits)
+						extHitsDeduped := removeDuplicates(extHits)
+
+						// Send data to elastic search
+						doElasticSearch(loc, namesList, extList, regexHitsDeduped, extHitsDeduped)
+					}
+
 				} else if resp.StatusCode == 403 {
 					log.Infof("\033[31m\033[1mFORBIDDEN\033[39m\033[0m http://%s (\033[33mhttp://%s.%s\033[39m)", pd.Permutation, pd.Domain.Domain, pd.Domain.Suffix)
 				}
@@ -592,20 +727,6 @@ func manualStart(d Domain) {
 
 func main() {
 	PreInit()
-
-	// If elastic search enabled
-	if esServer != "" {
-		// Connect to elastic search server
-		clientES, err := elastic.NewClient(elastic.SetURL(esServer))
-		if err != nil {
-			panic(err)
-		}
-		version, err := clientES.ElasticsearchVersion(esServer)
-		if err != nil {
-			panic(err)
-		}
-		log.Infof("Elastic search version %s", version)
-	}
 
 	switch action {
 	case "CERTSTREAM":
