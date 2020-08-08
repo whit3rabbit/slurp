@@ -31,6 +31,51 @@ Enumerates S3 buckets manually or via certstream
 - `slurp domain --file domain-names.txt` will read any file and go through line by line to see if buckets are open
 
 
+## Elasticsearch
+
+This requires an older version of Elasticsearch (unless someone wants to update mapping).  I use a docker VM:
+
+```
+sudo docker pull sebp/elk:612
+sudo docker run -p 5601:5601 -p 9200:9200  -p 5044:5044 \
+-v elk-data:/var/lib/elasticsearch --name elk sebp/elk:612
+```
+Also, create an index for slurp.  Replace IP with the IP address of the ElasticSearch server:
+```
+curl -X PUT "[IP OF ELASTICSEARCH]:9200/slurp?pretty" -H 'Content-Type: application/json' -d'
+{
+        "settings":{
+                "number_of_shards": 1,
+                "number_of_replicas": 0
+        },
+        "mappings":{
+		    "slurp":{
+                  "properties":{
+                                "url":{
+                                        "type":"keyword"
+                                },
+                                "time":{
+                                        "type":"date"
+                                },
+                                "exthit":{
+                                        "type":"keyword"
+                                },
+                                "regexhit":{
+                                        "type":"text"
+                                },
+                                "fileext":{
+                                        "type":"keyword"
+                                },
+                                "filename":{
+                                        "type":"text"
+                                }
+                    }
+		        }
+         }
+}
+'
+```
+
 ## Installation
 - Download from Releases section, or build yourself with `go build` or `build.sh`.
 
