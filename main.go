@@ -41,7 +41,7 @@ import (
 	"github.com/ti/nasync"
 	"golang.org/x/net/idna"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"github.com/Workiva/go-datastructures/queue"
 )
 
