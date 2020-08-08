@@ -85,16 +85,16 @@ const mapping = `
 					"type":"date"
 				},
 				"exthit":{
-					"type":"array"
+					"type":"keyword"
 				},
 				"regexhit":{
-					"type":"array"
+					"type":"text"
 				},
 				"fileext":{
-					"type":"array"
+					"type":"keyword"
 				},
 				"filename":{
-					"type":"array"
+					"type":"text"
 				}
 			}
 		}
