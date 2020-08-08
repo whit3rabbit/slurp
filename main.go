@@ -342,7 +342,7 @@ func doElasticSearch(loc string, namesList []string, extList []string, regexHits
 	ctx := context.Background()
 
 	// Connect to elastic search server
-	clientES, err := elastic.NewClient(elastic.SetURL(esServer))
+	clientES, err := elastic.NewClient(elastic.SetSniff(false), elastic.SetURL(esServer)) // https://github.com/olivere/elastic/issues/312#issuecomment-402602403
 	if err != nil {
 		panic(err)
 	}
